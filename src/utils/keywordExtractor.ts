@@ -44,7 +44,8 @@ export function extractKeywords(text: string): string[] {
     }
   }
   
-  return [...new Set([...keywords, ...phrases])]
+  const uniqueKeywords = new Set([...keywords, ...phrases])
+  return Array.from(uniqueKeywords)
 }
 
 /**
@@ -97,7 +98,8 @@ export function buildConversationQuery(currentMessage: string, conversationKeywo
   ]
   
   // Remove duplicates while preserving order
-  const unique = [...new Set(combined)]
+  const uniqueSet = new Set(combined)
+  const unique = Array.from(uniqueSet)
   
   return unique.slice(0, 5).join(' ')
 }

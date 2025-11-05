@@ -91,7 +91,8 @@ class AdCache {
    */
   cleanup(): void {
     const now = Date.now()
-    for (const [key, value] of this.cache.entries()) {
+    const entries = Array.from(this.cache.entries())
+    for (const [key, value] of entries) {
       if (now - value.timestamp > this.cacheDuration) {
         this.cache.delete(key)
       }
