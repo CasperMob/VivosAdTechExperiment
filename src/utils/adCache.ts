@@ -73,7 +73,9 @@ class AdCache {
     // Limit the size of recently shown set
     if (this.recentlyShown.size > this.recentWindowSize) {
       const firstItem = this.recentlyShown.values().next().value
-      this.recentlyShown.delete(firstItem)
+      if (firstItem) {
+        this.recentlyShown.delete(firstItem)
+      }
     }
   }
 
