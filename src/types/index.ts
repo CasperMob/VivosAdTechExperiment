@@ -18,6 +18,8 @@ export interface AdResult {
   format?: string
   ad_creative_id?: string
   recommendations?: AdResult[] // Additional ad recommendations
+  impression_url?: string // Vivos tracking URL
+  click_url?: string // Vivos tracking URL
 }
 
 export interface ChatRequest {
