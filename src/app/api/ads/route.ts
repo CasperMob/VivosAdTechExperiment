@@ -3,26 +3,35 @@ import axios from 'axios'
 import { AdResult } from '@/types'
 import { adCache } from '@/utils/adCache'
 
-const SERPAPI_KEY = process.env.SERPAPI_KEY || '5a39ccd8904d085c80caea4ef69876752c4ed03f4719fb97b548e64d7d90bc4d'
+// Import prisma conditionally to avoid errors if not set up
+let prisma: any = null
+try {
+  const prismaModule = require('@/lib/prisma')
+  prisma = prismaModule.prisma
+} catch (error) {
+  // Prisma not available, continue without tracking
+  console.log('Prisma not available - publisher tracking disabled')
+}
+
+const VIVOS_API_URL = 'https://vivos-ad-network.vercel.app/api/ads'
+const DEFAULT_PUBLISHER_KEY = process.env.VIVOS_PUBLISHER_KEY || 'pub_30b766e0bb88c72a144b7c3c4c998eb5ea7910c9dcd57169d5ecbdfed1624467'
 
 interface ScoredAd extends AdResult {
   bid_value: number
   relevance_score: number
   combined_score: number
   matching_keywords: number
+  impression_url?: string
+  click_url?: string
 }
 
 /**
  * Score and rank ads by contextual relevance + bid value
  * Scoring formula: 70% relevance + 30% bid value (normalized)
- * 
- * Set RANK_BY_HIGHEST_BID to true to rank by bid only (highest bid wins)
  */
-const RANK_BY_HIGHEST_BID = false // Set to true to rank by highest bid only
-
 function scoreAds(ads: AdResult[], keywords: string[]): ScoredAd[] {
   if (!keywords.length) {
-    keywords = ['shopping']
+    keywords = ['general']
   }
 
   const keywordsSet = new Set(keywords.map(k => k.toLowerCase()))
@@ -47,10 +56,7 @@ function scoreAds(ads: AdResult[], keywords: string[]): ScoredAd[] {
     const bidNormalized = Math.min((ad.bid_value || 0) / 10.0, 1.0)
 
     // Combined score: 70% relevance, 30% bid
-    // OR use bid only if RANK_BY_HIGHEST_BID is true
-    const score = RANK_BY_HIGHEST_BID 
-      ? bidNormalized // Pure bid ranking
-      : (0.7 * relevance) + (0.3 * bidNormalized) // Combined ranking
+    const score = (0.7 * relevance) + (0.3 * bidNormalized)
 
     return {
       ...ad,
@@ -62,58 +68,55 @@ function scoreAds(ads: AdResult[], keywords: string[]): ScoredAd[] {
   })
 
   // Sort by combined score (highest first)
-  // If RANK_BY_HIGHEST_BID is true, this sorts by bid value
   scoredAds.sort((a, b) => b.combined_score - a.combined_score)
 
   return scoredAds
 }
 
 /**
- * Fetch ads from Google Ads Transparency Center
- * This API provides ACTUAL ads with real advertiser data
+ * Fetch ads from Vivos Ad Network
+ * This is the ONLY ad source
  */
-async function fetchTransparencyAds(query: string, keywords: string[]): Promise<ScoredAd[]> {
+async function fetchVivosAds(keywords: string[], publisherKey?: string): Promise<ScoredAd[]> {
   try {
-    console.log(`\n🔍 Fetching ads from Google Ads Transparency Center for: "${query}"`)
+    // Join keywords into a single string (space separated)
+    const keywordsString = keywords.join(' ')
     
-    const response = await axios.get('https://serpapi.com/search', {
+    console.log(`\n🔍 Fetching ads from Vivos Ad Network`)
+    console.log(`   Keywords: "${keywordsString}"`)
+    console.log(`   Publisher Key: ${publisherKey || DEFAULT_PUBLISHER_KEY}`)
+    
+    const response = await axios.get(VIVOS_API_URL, {
       params: {
-        engine: 'google_ads_transparency_center',
-        q: query,
-        api_key: SERPAPI_KEY,
+        keywords: keywordsString,
+        publisher_key: publisherKey || DEFAULT_PUBLISHER_KEY,
       },
       timeout: 10000,
     })
 
     const data = response.data
-    const rawAds = data.ad_creatives || []
+    const ads = data.ads || []
 
-    if (!rawAds.length) {
-      console.log('⚠️  No ads found in Transparency Center')
+    if (!ads.length) {
+      console.log('⚠️  No ads found in Vivos Ad Network')
       return []
     }
 
-    console.log(`✅ Found ${rawAds.length} ads from Transparency Center`)
+    console.log(`✅ Found ${ads.length} ads from Vivos Ad Network`)
 
-    // Process ads and assign random bid values for RTB simulation
-    const processedAds: AdResult[] = rawAds.slice(0, 8).map((ad: any) => {
-      // Generate realistic bid value based on ad quality
-      const hasImage = !!ad.image
-      const baseBid = Math.random() * 5 + 0.5 // $0.50 - $5.50
-      const imageBidBoost = hasImage ? Math.random() * 3 : 0 // Up to $3 extra for image ads
-      const bidValue = Math.round((baseBid + imageBidBoost) * 100) / 100
-
+    // Transform Vivos API format to our AdResult format
+    const processedAds: AdResult[] = ads.map((ad: any) => {
       return {
-        title: ad.advertiser || 'Sponsored Ad',
-        link: ad.link || '#',
-        snippet: ad.format === 'text' 
-          ? 'Click to view this sponsored advertisement' 
-          : `${ad.format.charAt(0).toUpperCase() + ad.format.slice(1)} advertisement`,
-        thumbnail: ad.image,
-        source: ad.advertiser || 'Sponsored',
-        bid_value: bidValue,
-        format: ad.format,
-        ad_creative_id: ad.ad_creative_id,
+        title: ad.title || 'Sponsored Ad',
+        link: ad.target_url || '#',
+        snippet: ad.message || ad.title || 'Click to learn more',
+        thumbnail: ad.image_url || undefined,
+        source: ad.title || 'Sponsored',
+        bid_value: ad.cpc_bid || 0,
+        ad_creative_id: ad.id,
+        // Store tracking URLs for later use
+        impression_url: ad.impression_url,
+        click_url: ad.click_url,
       }
     })
 
@@ -133,61 +136,117 @@ async function fetchTransparencyAds(query: string, keywords: string[]): Promise<
 
     return scoredAds
   } catch (error: any) {
-    console.log(`⚠️  Transparency Center failed: ${error.message}`)
+    console.error(`❌ Vivos Ad Network failed: ${error.message}`)
     return []
   }
 }
 
-/**
- * Fetch shopping ads as fallback
- */
-async function fetchShoppingAds(query: string, keywords: string[]): Promise<ScoredAd[]> {
+// Support both GET (publisher API) and POST (chatbot API)
+export async function GET(request: NextRequest) {
   try {
-    console.log(`\n🛒 Fetching shopping ads for: "${query}"`)
-    
-    const response = await axios.get('https://serpapi.com/search', {
-      params: {
-        q: query,
-        api_key: SERPAPI_KEY,
-        engine: 'google_shopping',
-        num: 10,
-      },
-      timeout: 10000,
-    })
+    const searchParams = request.nextUrl.searchParams
+    const context = searchParams.get('context') || ''
+    const publisherKey = searchParams.get('publisher_key')
 
-    const data = response.data
-    const shoppingResults = data.shopping_results || []
-
-    if (!shoppingResults.length) {
-      console.log('⚠️  No shopping results found')
-      return []
+    if (!context) {
+      return NextResponse.json(
+        { error: 'context is required' },
+        { status: 400 }
+      )
     }
 
-    console.log(`✅ Found ${shoppingResults.length} shopping results`)
-
-    // Process shopping results as ads
-    const processedAds: AdResult[] = shoppingResults.slice(0, 8).map((product: any) => {
-      // Calculate bid based on price and rating
-      const price = parseFloat(product.extracted_price || product.price?.replace(/[^0-9.]/g, '') || '0')
-      const rating = parseFloat(product.rating || '0')
-      const baseBid = Math.min(price * 0.05, 10) // 5% of price, max $10
-      const ratingBoost = rating > 4 ? 2 : rating > 3 ? 1 : 0
-      const bidValue = Math.round((baseBid + ratingBoost + Math.random() * 2) * 100) / 100
-
-      return {
-        title: product.title || 'Product',
-        link: product.link || product.product_link || '#',
-        snippet: `${product.price || ''} ${product.rating ? `⭐ ${product.rating}/5` : ''} - ${product.source || 'Shop now'}`.trim(),
-        thumbnail: product.thumbnail,
-        source: product.source || 'Shopping',
-        bid_value: Math.max(0.5, bidValue),
+    // If publisher_key is provided, validate and track
+    let publisher = null
+    if (publisherKey && prisma) {
+      try {
+        publisher = await prisma.publisher.findUnique({
+          where: { apiKey: publisherKey },
+        })
+      } catch (error) {
+        // Prisma not available, continue without tracking
       }
-    })
+    }
 
-    return scoreAds(processedAds, keywords)
-  } catch (error: any) {
-    console.log(`⚠️  Shopping API failed: ${error.message}`)
-    return []
+    // Extract keywords from context
+    const keywords = context.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2)
+
+    // Fetch ads from Vivos Ad Network
+    let scoredAds: ScoredAd[] = []
+    scoredAds = await fetchVivosAds(keywords, publisherKey || undefined)
+
+    if (scoredAds.length === 0) {
+      return NextResponse.json(
+        { error: 'No ads found' },
+        { status: 404 }
+      )
+    }
+
+    const topAds = scoredAds.slice(0, 5)
+    const winningAd = topAds[0]
+
+    // Track impression - use Vivos tracking URL if available
+    if (winningAd.impression_url) {
+      // Fire and forget - track impression with Vivos
+      fetch(winningAd.impression_url).catch(err => {
+        console.error('Failed to track impression with Vivos:', err)
+      })
+    }
+    
+    // Also log impression if publisher exists and prisma is available
+    if (publisher && prisma) {
+      try {
+        await prisma.adEvent.create({
+          data: {
+            publisherId: publisher.id,
+            eventType: 'impression',
+            adId: winningAd.ad_creative_id || undefined,
+            advertiser: winningAd.title,
+            bidValue: winningAd.bid_value,
+            context: context,
+            revenue: 0,
+          },
+        })
+      } catch (error) {
+        // Ignore tracking errors
+      }
+    }
+
+    const recommendations = topAds.slice(1, 5).map(ad => ({
+      title: ad.title,
+      link: ad.link,
+      snippet: ad.snippet,
+      thumbnail: ad.thumbnail,
+      source: ad.source,
+      bid_value: ad.bid_value,
+      relevance_score: ad.relevance_score,
+      impression_url: ad.impression_url,
+      click_url: ad.click_url,
+    }))
+
+    return NextResponse.json({
+      ad: {
+        title: winningAd.title,
+        link: winningAd.link,
+        snippet: winningAd.snippet,
+        thumbnail: winningAd.thumbnail,
+        source: winningAd.source,
+        bid_value: winningAd.bid_value,
+        relevance_score: winningAd.relevance_score,
+        combined_score: winningAd.combined_score,
+        matching_keywords: winningAd.matching_keywords,
+        ad_creative_id: winningAd.ad_creative_id,
+        impression_url: winningAd.impression_url,
+        click_url: winningAd.click_url,
+        recommendations: recommendations,
+      },
+      recommendations: recommendations,
+    })
+  } catch (error) {
+    console.error('Error fetching ad:', error)
+    return NextResponse.json(
+      { error: 'Failed to fetch ad' },
+      { status: 500 }
+    )
   }
 }
 
@@ -202,9 +261,12 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // Extract keywords from context if needed
+    const contextKeywords = keywords.length > 0 ? keywords : query.toLowerCase().split(/\s+/).filter((w: string) => w.length > 2)
+
     console.log(`\n${'='.repeat(80)}`)
     console.log(`🎯 AD REQUEST: "${query}"`)
-    console.log(`📝 Keywords: [${keywords.join(', ')}]`)
+    console.log(`📝 Keywords: [${contextKeywords.join(', ')}]`)
     console.log('='.repeat(80))
 
     // Check cache first
@@ -215,49 +277,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ad: cachedAd })
     }
 
+    // Fetch ads from Vivos Ad Network
     let scoredAds: ScoredAd[] = []
-
-    // Strategy 1: Try Google Ads Transparency Center (REAL ADS with bids)
-    scoredAds = await fetchTransparencyAds(query, keywords)
-
-    // Strategy 2: Fallback to Shopping API
-    if (scoredAds.length === 0) {
-      scoredAds = await fetchShoppingAds(query, keywords)
-    }
-
-    // Strategy 3: Last resort - regular search
-    if (scoredAds.length === 0) {
-      console.log('\n⚠️  All ad sources failed, using fallback search')
-      try {
-        const response = await axios.get('https://serpapi.com/search', {
-          params: {
-            q: query,
-            api_key: SERPAPI_KEY,
-            engine: 'google',
-            num: 5,
-          },
-        })
-
-        const searchData = response.data
-        
-        if (searchData.shopping_results?.length > 0) {
-          const product = searchData.shopping_results[0]
-          scoredAds = [{
-            title: product.title || 'Featured Product',
-            link: product.link || '#',
-            snippet: `${product.price || ''} - Shop now`,
-            thumbnail: product.thumbnail,
-            source: product.source || 'Recommended',
-            bid_value: 1.0,
-            relevance_score: 0.5,
-            combined_score: 0.5,
-            matching_keywords: 0,
-          }]
-        }
-      } catch (error) {
-        console.log('❌ All ad fetching strategies failed')
-      }
-    }
+    scoredAds = await fetchVivosAds(contextKeywords)
 
     if (scoredAds.length === 0) {
       return NextResponse.json(
@@ -280,8 +302,16 @@ export async function POST(request: NextRequest) {
     adCache.markAsShown(winningAd.title)
 
     return NextResponse.json({ 
-      ad: winningAd, // Primary ad (for backward compatibility)
-      recommendations: topAds, // All recommendations
+      ad: {
+        ...winningAd,
+        impression_url: winningAd.impression_url,
+        click_url: winningAd.click_url,
+      }, // Primary ad (for backward compatibility)
+      recommendations: topAds.map(ad => ({
+        ...ad,
+        impression_url: ad.impression_url,
+        click_url: ad.click_url,
+      })), // All recommendations
       total_ads: scoredAds.length,
       bid_value: winningAd.bid_value,
     })
@@ -293,4 +323,3 @@ export async function POST(request: NextRequest) {
     )
   }
 }
-

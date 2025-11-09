@@ -7,7 +7,14 @@ interface AdCardProps {
 
 // Track ad clicks (non-blocking)
 function trackClick(ad: AdResult, event: React.MouseEvent<HTMLAnchorElement>) {
-  // Don't block navigation - fire and forget
+  // If Vivos click URL is available, use it for tracking
+  if (ad.click_url) {
+    fetch(ad.click_url).catch((error) => {
+      console.error('Failed to track click with Vivos:', error)
+    })
+  }
+  
+  // Also track in our system (non-blocking)
   fetch('/api/track/click', {
     method: 'POST',
     headers: {

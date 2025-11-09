@@ -100,7 +100,7 @@ export default function Home() {
                 AI Chatbot
               </h1>
               <p className="text-xs text-[#8e8ea0] mt-0.5">
-                Powered by OpenAI & SerpApi
+                Powered by OpenAI & Vivos Ad Network
               </p>
             </div>
           </div>
